@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import {writeFileSync} from 'node:fs';
+const base=process.env.TEST_BASE||'http://127.0.0.1:5175',suffix=Date.now();
+const admin={email:`qa-admin-${suffix}@example.test`,id:`qa-admin-${suffix}`};
+const teammate={email:`qa-owner-${suffix}@example.test`,id:`qa-owner-${suffix}`};
+async function call(user,path,body,status=200){const r=await fetch(base+path,{signal:AbortSignal.timeout(20000),method:body?'POST':'GET',headers:{connection:'close','oai-authenticated-user-id':user.id,'oai-authenticated-user-email':user.email,'Content-Type':'application/json',origin:base},body:body?JSON.stringify(body):undefined});const d=await r.json();console.log(path,r.status);assert.equal(r.status,status,JSON.stringify(d));return d;}
+await call(admin,'/api/workspace');await call(teammate,'/api/workspace');
+const c=await call(admin,'/api/records',{kind:'customer',data:{title:'Shared QA customer',function:'IT',owner:admin.email,ownerEmail:admin.email}});
+await call(admin,'/api/workspace',{operation:'member',data:{email:teammate.email,name:'QA Action Owner',role:'action_owner',functions:[],customers:[],active:true}});
+let ws=await call(teammate,'/api/workspace');assert.equal(ws.invitations.length,1);
+await call(teammate,'/api/workspace',{operation:'accept',id:ws.invitations[0].id});
+const a=await call(admin,'/api/records',{kind:'action',data:{title:'Assigned task',customerId:c.id,owner:'QA Action Owner',ownerEmail:teammate.email,due:'2026-11-15',status:'Open'}});
+const f=await call(admin,'/api/records',{kind:'feedback',data:{title:'Restricted executive context',customerId:c.id,date:'2026-11-01',sensitive:true,allowedEmails:[],sentiment:'Critical'}});
+const visible=await call(teammate,'/api/records');assert.ok(visible.some(r=>r.id===a.id));assert.ok(!visible.some(r=>r.id===f.id));
+await call(teammate,'/api/records',{id:f.id,version:f.version,kind:'feedback',data:f},403);
+const updated=await call(teammate,'/api/records',{id:a.id,version:a.version,kind:'action',data:{...a,status:'In Progress',progressNotes:'Working on it'}});
+await call(teammate,'/api/records',{id:a.id,version:updated.version,kind:'action',data:{...updated,ownerEmail:admin.email,owner:admin.email}},403);
+let found=await call(teammate,'/api/search?q=Restricted');assert.equal(found.total,0);
+found=await call(teammate,'/api/search?q=Assigned');assert.equal(found.total,1);
+await call(teammate,'/api/workspace',{operation:'member',data:{email:admin.email,name:'Admin',role:'action_owner',functions:[],customers:[],active:true}},403);
+await call(admin,'/api/workspace',{operation:'member',data:{email:teammate.email,name:'QA Function Head',role:'function_head',functions:['Finance'],customers:[],active:true}});
+assert.equal((await call(teammate,'/api/records')).length,0);assert.equal((await call(teammate,'/api/search?q=Shared')).total,0);
+await call(admin,'/api/workspace',{operation:'member',data:{email:teammate.email,name:'QA Function Head',role:'function_head',functions:['IT'],customers:[],active:true}});
+assert.ok((await call(teammate,'/api/records')).some(r=>r.id===c.id));assert.equal((await call(teammate,'/api/records')).some(r=>r.id===f.id),false);
+writeFileSync('outputs/roles-fixture.json',JSON.stringify({admin,teammate,customer:c,feedback:f}));
+console.log('PASS: invitation acceptance, shared records, assigned-action updates, function scopes, restricted feedback/search and membership protection.');
